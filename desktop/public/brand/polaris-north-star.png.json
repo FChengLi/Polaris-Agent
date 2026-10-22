@@ -1,0 +1,6 @@
+{
+  "tool": "built-in image_gen",
+  "transparent_background": true,
+  "selection": "User selected this blue/white North Star version; later glow version was declined.",
+  "prompt": "Use case: logo-brand.\nCreate a single final minimalist app logo for Polaris Agent, named after the North Star. The user wants blue and white, no letter P and no monogram or lettering.\nDesign a calm medium-blue circular emblem (#376FA6) containing one crisp white North Star: one geometric eight-point astronomical star, with a longer vertical axis, shorter horizontal rays, and four very short diagonal rays. Balanced, spare geometry and generous negative space; unmistakable directional North Star, not a cluster of AI sparkles. The blue circular field and the white star must both be fully opaque. Outside the emblem is genuinely transparent alpha. Center the emblem at about 84% of the square canvas with even padding.\nFlat, clean, vector-like, professional product identity that reads clearly at 16/24/32 pixels. Only two solid colors: muted medium blue and white. No P, no letters, no text, no wordmark, no compass ring, no arrows, no robot, no orbit, no extra stars, no gradients, no glow, no shadows, no 3D, no texture and no mockup. One logo only."
+}
