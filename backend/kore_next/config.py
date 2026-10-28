@@ -17,6 +17,8 @@ def _path(name: str, default: Path) -> Path:
 
 @dataclass(frozen=True)
 class Settings:
+    """集中读取环境配置；数据目录与工作目录可分别覆盖。"""
+
     provider: str = os.getenv("KORENEXT_PROVIDER", "openai")
     model: str = os.getenv("KORENEXT_MODEL", "gpt-4.1-mini")
     api_key: str = os.getenv("KORENEXT_API_KEY", "")

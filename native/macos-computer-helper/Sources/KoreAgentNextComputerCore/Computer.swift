@@ -2,6 +2,7 @@ import AppKit
 import ApplicationServices
 import Foundation
 
+/// 管理一次桌面控制会话；操作前校验会话，并用观察结果中的元素引用定位目标。
 public final class ComputerController {
     private var sessionID: String?
     private var observationID: String?
@@ -12,6 +13,7 @@ public final class ComputerController {
     public init() {}
 
     public func handle(_ request: HelperRequest) throws -> JSONValue {
+        // Host 经由标准输入发送方法名，所有桌面动作统一从这里分发。
         switch request.method {
         case "status": return status()
         case "request_permission": return requestPermission(request.params)

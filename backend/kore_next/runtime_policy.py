@@ -49,6 +49,8 @@ class RunBudgetConfig:
 
 
 class RunBudget:
+    """按累计 token 和模型调用次数分级预警、收尾与停止。"""
+
     def __init__(self, config: RunBudgetConfig | None = None) -> None:
         self.config = config or RunBudgetConfig()
 
@@ -81,7 +83,7 @@ class RunBudget:
 
 
 class RepeatedToolCallGuard:
-    """Stops the model after three identical consecutive tool rounds."""
+    """连续多轮发起相同工具调用时停止，防止 Agent 原地打转。"""
 
     def __init__(self, limit: int = 3) -> None:
         self.limit = limit

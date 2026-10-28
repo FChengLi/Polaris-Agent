@@ -9,16 +9,13 @@ from typing import Any
 
 from .database import Database
 from .util import dumps, loads, now, uid
+from .wiki import scan_knowledge
 
 DistillationModel = Callable[[str], Awaitable[str]]
 
 
 class SkillLearningService:
-    """Turn repeated successful tool traces into reviewable skill candidates.
-
-    Candidates are deliberately never enabled automatically.  They become installable
-    drafts after the same normalized workflow succeeds more than once.
-    """
+    """从重复成功的工具轨迹提炼 Skill 候选；候选必须审核，不会自动启用。"""
 
     def __init__(self, db: Database) -> None:
         self.db = db
@@ -52,7 +49,7 @@ class SkillLearningService:
                     successful.add(str(result["tool_call_id"]))
                     outcomes[str(result["tool_call_id"])] = str(result.get("output") or "")[-1200:]
         calls = [call for call in calls if str(call.get("id")) in successful]
-        # One-off reads are not a reusable workflow.  Require at least two useful steps.
+        # 单次读取不能算可复用流程，至少需要两个有效操作步骤。
         useful = [call for call in calls if call.get("name") not in {"get_current_time", "memory_list"}]
         if len(useful) < 2:
             await self.db.set_json(processed_key, True)
@@ -71,6 +68,9 @@ class SkillLearningService:
         stamp = now()
         if row:
             candidate = loads(row["data_json"], {})
+            if candidate.get("status") in {"approved", "promoted", "quarantined"}:
+                await self.db.set_json(processed_key, True)
+                return None
             candidate["success_count"] = int(candidate.get("success_count", 1)) + 1
             candidate["last_run_id"] = run["id"]
             candidate["updated_at"] = stamp
@@ -102,6 +102,9 @@ class SkillLearningService:
             distilled = await self._distill(candidate, model)
             if distilled:
                 candidate.update(distilled)
+        candidate["risk_flags"] = scan_knowledge(
+            "\n".join(str(candidate.get(key) or "") for key in ("title", "description", "instructions", "applicability"))
+        )
         await self.db.execute(
             "INSERT INTO skill_candidates(id,status,data_json,created_at,updated_at) VALUES(?,?,?,?,?) "
             "ON CONFLICT(id) DO UPDATE SET status=excluded.status,data_json=excluded.data_json,updated_at=excluded.updated_at",
@@ -133,6 +136,8 @@ class SkillLearningService:
         if not target:
             return None
         for candidate in await self.list(limit=200):
+            if candidate.get("status") in {"approved", "promoted", "quarantined"}:
+                continue
             existing = set(candidate.get("tool_sequence") or [])
             if existing and len(target & existing) / len(target | existing) >= 0.8:
                 return candidate
@@ -158,6 +163,8 @@ class SkillLearningService:
         candidate_terms = set(re.findall(r"[a-z0-9\u4e00-\u9fff]+", f"{candidate.get('title')} {candidate.get('description')}".lower()))
         best: tuple[float, str] | None = None
         for skill in existing_skills:
+            if skill.get("scope") != "project":
+                continue
             terms = set(re.findall(r"[a-z0-9\u4e00-\u9fff]+", f"{skill.get('name')} {skill.get('description')}".lower()))
             score = len(candidate_terms & terms) / max(1, len(candidate_terms | terms))
             if best is None or score > best[0]:
@@ -216,11 +223,58 @@ class SkillLearningService:
         if not row:
             raise KeyError(candidate_id)
         candidate = loads(row["data_json"], {})
+        if candidate.get("status") != "approved":
+            raise ValueError("Skill candidate must be reviewed before installation")
         candidate.update(status="promoted", promoted_skill=skill_name, updated_at=now())
         await self.db.execute(
             "UPDATE skill_candidates SET status='promoted',data_json=?,updated_at=? WHERE id=?",
             (dumps(candidate), candidate["updated_at"], candidate_id),
         )
+
+    async def get(self, candidate_id: str) -> dict[str, Any]:
+        row = await self.db.fetchone("SELECT data_json FROM skill_candidates WHERE id=?", (candidate_id,))
+        if not row:
+            raise KeyError(candidate_id)
+        return loads(row["data_json"], {})
+
+    async def review(self, candidate_id: str, *, reviewer: str, checks: dict[str, bool]) -> dict[str, Any]:
+        required = {"relevance", "source", "applicability", "sensitive_information", "prompt_injection"}
+        if not reviewer.strip() or not required.issubset(checks) or not all(checks[key] is True for key in required):
+            raise ValueError("Reviewer and all five review checks are required")
+        candidate = await self.get(candidate_id)
+        if candidate["status"] != "ready":
+            raise ValueError("Only a ready candidate can be reviewed")
+        run_ids = candidate.get("example_run_ids") or []
+        if not run_ids:
+            raise ValueError("Candidate has no source runs")
+        for run_id in run_ids:
+            row = await self.db.fetchone("SELECT status FROM runs WHERE id=?", (str(run_id),))
+            if not row or row["status"] != "completed":
+                raise ValueError("Candidate source run is missing or incomplete")
+        candidate["risk_flags"] = scan_knowledge(
+            "\n".join(str(candidate.get(key) or "") for key in ("title", "description", "instructions", "applicability"))
+        )
+        if any(candidate["risk_flags"].values()):
+            raise ValueError("Candidate contains a secret or instruction pattern; quarantine it")
+        candidate.update(status="approved", review={"reviewer": reviewer.strip(), "checks": checks, "reviewed_at": now()}, updated_at=now())
+        await self.db.execute(
+            "UPDATE skill_candidates SET status='approved',data_json=?,updated_at=? WHERE id=?",
+            (dumps(candidate), candidate["updated_at"], candidate_id),
+        )
+        return candidate
+
+    async def quarantine(self, candidate_id: str, *, reason: str) -> dict[str, Any]:
+        if not reason.strip():
+            raise ValueError("A quarantine reason is required")
+        candidate = await self.get(candidate_id)
+        if candidate["status"] == "quarantined":
+            return candidate
+        candidate.update(status="quarantined", quarantine_reason=reason.strip(), updated_at=now())
+        await self.db.execute(
+            "UPDATE skill_candidates SET status='quarantined',data_json=?,updated_at=? WHERE id=?",
+            (dumps(candidate), candidate["updated_at"], candidate_id),
+        )
+        return candidate
 
     @staticmethod
     def _title(user_message: str, tools: list[str]) -> str:

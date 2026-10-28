@@ -13,6 +13,7 @@ export function useConfirmAction() {
 }
 
 export function ConfirmProvider({ children }: { children: ReactNode }) {
+  // 全局确认框把用户选择包装成 Promise，并在关闭后恢复先前焦点。
   const [pending, setPending] = useState<Pending | null>(null)
   const pendingRef = useRef<Pending | null>(null)
   const cancelButton = useRef<HTMLButtonElement>(null)

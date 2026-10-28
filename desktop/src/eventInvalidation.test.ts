@@ -7,7 +7,7 @@ describe('event cache invalidation',()=>{
     expect(queryKeysForAgentEvent('reasoning_delta')).toEqual([])
   })
   it('refreshes only affected data',()=>{
-    expect(queryKeysForAgentEvent('tool_result')).toEqual(['trace'])
+    expect(queryKeysForAgentEvent('tool_result')).toEqual(['trace','wiki','memory','extensions'])
     expect(queryKeysForAgentEvent('approval_requested')).toEqual(['approvals','trace'])
     expect(queryKeysForAgentEvent('task_updated')).toEqual(['tasks','trace'])
     expect(queryKeysForAgentEvent('agent_completed')).toContain('runs')

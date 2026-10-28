@@ -17,6 +17,8 @@ class _RunState:
 
 
 class ComputerStagnationGuard:
+    """连续失败或操作后画面不变时停止桌面自动化，避免无效循环。"""
+
     def __init__(self, *, failure_limit: int = 3, stagnation_limit: int = 3) -> None:
         self.failure_limit = failure_limit
         self.stagnation_limit = stagnation_limit
@@ -50,8 +52,7 @@ class ComputerStagnationGuard:
             state.action_since_observe = True
             return
         fingerprint = self._observation_fingerprint(output)
-        # An identical observation counts as stagnation only after an action;
-        # repeated read-only observations are harmless.
+        # 只有执行动作后画面仍相同才算停滞；连续观察本身不计入。
         if state.action_since_observe and fingerprint and fingerprint == state.last_observation:
             state.unchanged_after_actions += 1
         else:

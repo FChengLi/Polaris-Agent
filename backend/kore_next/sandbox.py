@@ -31,6 +31,8 @@ class ProcessLaunch:
 
 
 class SandboxSupervisor:
+    """统一校验子进程的工作目录、环境变量和隔离策略。"""
+
     SAFE_ENV = {
         "PATH",
         "PATHEXT",
@@ -50,6 +52,7 @@ class SandboxSupervisor:
         self.workspace = workspace.resolve()
 
     def resolve(self, raw: str, *, must_exist: bool = False) -> Path:
+        # resolve 会折叠 .. 和符号链接，再确认结果仍位于工作区内。
         candidate = (self.workspace / raw).resolve()
         try:
             candidate.relative_to(self.workspace)
@@ -60,8 +63,7 @@ class SandboxSupervisor:
         return candidate
 
     def clean_environment(self, additions: dict[str, Any] | None = None) -> dict[str, str]:
-        # Child processes receive only launch essentials plus explicit config,
-        # avoiding accidental inheritance of host credentials.
+        # 子进程只继承启动必需变量和显式配置，避免把宿主机凭据带进去。
         env = {key: value for key, value in os.environ.items() if key.upper() in self.SAFE_ENV}
         for key, value in (additions or {}).items():
             name = str(key)
@@ -83,7 +85,7 @@ class SandboxSupervisor:
         writable_roots: list[str] | None = None,
         allowed_domains: list[str] | None = None,
     ) -> ProcessLaunch:
-        """Validate policy before any child process is created, for Shell and MCP alike."""
+        """Shell 与 MCP 共用此入口；创建子进程前先确认隔离策略可执行。"""
         if filesystem not in {"host", "workspace", "readonly"} or network not in {"allowed", "denied"}:
             raise SandboxError("Unsupported sandbox policy; process was not started")
         if readable_roots or writable_roots or allowed_domains:
@@ -97,7 +99,7 @@ class SandboxSupervisor:
         profile_path: Path | None = None
         backend = "host"
         if filesystem != "host" or network != "allowed":
-            # Never silently run an isolation request on an unsupported host.
+            # 宿主机不支持隔离时直接拒绝，不能悄悄退化为裸执行。
             if sys.platform != "darwin":
                 raise SandboxError("Workspace sandbox is unavailable on this platform; process was not started")
             sandbox_exec = shutil.which("sandbox-exec") or "/usr/bin/sandbox-exec"

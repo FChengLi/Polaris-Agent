@@ -8,11 +8,14 @@ from .util import dumps, loads, now, uid
 
 
 class EvidenceStore:
+    """保存工具结果的证据记录，并用哈希辅助核对原始输出。"""
+
     def __init__(self, db: Database, *, max_records: int = 10_000):
         self.db = db
         self.max_records = max_records
 
     async def record(self, run_id: str, kind: str, data: dict[str, Any]) -> dict[str, Any]:
+        # 证据与 Run、会话和工具调用关联，便于事后追溯结论来源。
         run = await self.db.fetchone("SELECT conversation_id FROM runs WHERE id=?", (run_id,))
         raw = str(data.get("output") or "")
         item = {

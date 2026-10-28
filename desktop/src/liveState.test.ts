@@ -18,6 +18,16 @@ describe('live run state',()=>{
     const second=reduceAgentEvent(first,{run_id:'two',type:'assistant_delta',delta:'new'})
     expect(second).toMatchObject({runId:'two',content:'new'})
   })
+
+  it('does not restart the reply for events after completion',()=>{
+    const running=reduceAgentEvent(null,{run_id:'run',type:'agent_started'})
+    const completed=reduceAgentEvent(running,{run_id:'run',type:'agent_completed'})
+    expect(completed).toMatchObject({runId:'run',status:'completed'})
+    expect(reduceAgentEvent(completed,{run_id:'run',type:'post_run_started'})).toBe(completed)
+    expect(reduceAgentEvent(null,{run_id:'run',type:'post_run_completed'})).toBeNull()
+    expect(reduceAgentEvent(null,{run_id:'run',type:'agent_completed'})).toBeNull()
+    expect(reduceAgentEvent(completed,{run_id:'run',type:'assistant_delta',delta:'late'})).toBe(completed)
+  })
 })
 
 describe('desktop approval queue',()=>{

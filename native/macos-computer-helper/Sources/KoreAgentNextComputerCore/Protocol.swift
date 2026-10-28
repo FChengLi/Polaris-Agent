@@ -1,18 +1,19 @@
 import Foundation
 
+/// Host 发给本地辅助进程的请求格式。
 public struct HelperRequest: Decodable {
     public let id: JSONValue
     public let method: String
     public let params: [String: JSONValue]
 }
 
+/// 保留 JSON 原始类型，供请求参数和响应在 Swift 与 Python 之间传递。
 public indirect enum JSONValue: Codable, Equatable {
     case string(String), number(Double), bool(Bool), object([String: JSONValue]), array([JSONValue]), null
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.singleValueContainer()
-        // Try Bool before Double to preserve the boolean case when decoding
-        // JSON values that pass through Foundation's number representation.
+        // 先尝试 Bool 再尝试 Double，避免 Foundation 将布尔值解码成数字。
         if c.decodeNil() { self = .null }
         else if let v = try? c.decode(Bool.self) { self = .bool(v) }
         else if let v = try? c.decode(Double.self) { self = .number(v) }

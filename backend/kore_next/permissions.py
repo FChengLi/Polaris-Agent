@@ -21,7 +21,7 @@ class PermissionVerdict:
 
 
 class PermissionRuleStore:
-    """Match the complete JSON arguments without persisting their sensitive values."""
+    """按完整工具参数匹配持久授权规则，同时避免明文保存敏感参数。"""
 
     MATCHER_VERSION = 2
 
@@ -37,8 +37,7 @@ class PermissionRuleStore:
     def matcher_for(self, arguments: dict[str, Any]) -> dict[str, Any]:
         if self.signing_key is None:
             raise RuntimeError("persistent permission signing key is unavailable")
-        # Canonical JSON makes equivalent key orders match; HMAC avoids storing
-        # command arguments or a guessable plain hash in persistent rules.
+        # JSON 规范化后，字段顺序不同也能匹配；HMAC 避免持久化明文参数或易猜测的普通哈希。
         canonical = json.dumps(arguments, sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
         digest = hmac.new(self.signing_key, canonical.encode("utf-8"), hashlib.sha256).hexdigest()
         return {"version": self.MATCHER_VERSION, "arguments_hmac": digest}
@@ -80,7 +79,7 @@ class PermissionRuleStore:
             candidates.append((priority, row))
         if not candidates:
             return PermissionVerdict("ask")
-        # The narrowest matching scope wins, with the newest rule breaking ties.
+        # 优先采用范围更窄的规则；同一范围内采用最新规则。
         _, selected = max(candidates, key=lambda pair: (pair[0], pair[1]["created_at"]))
         return PermissionVerdict(str(selected["effect"]), str(selected["id"]))
 

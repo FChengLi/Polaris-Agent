@@ -32,6 +32,7 @@ from .secrets import SecretStore
 from .skill_learning import SkillLearningService
 from .tasks import TaskService
 from .util import dumps, loads, now, uid
+from .wiki import WikiService, scan_knowledge
 
 Broadcaster = Callable[[str, dict[str, Any]], Awaitable[None]]
 
@@ -49,7 +50,15 @@ def required(params: dict[str, Any], key: str) -> Any:
     return value
 
 
+def title_from_first_message(content: str) -> str:
+    first_line = next((line.strip() for line in content.splitlines() if line.strip()), "")
+    title = re.sub(r"\s+", " ", first_line)
+    return title[:40].rstrip() + ("…" if len(title) > 40 else "") if title else "新对话"
+
+
 class Application:
+    """统一编排 RPC、Agent Run、审批与持久化服务的 Host 入口。"""
+
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or Settings()
         self.settings.ensure_dirs()
@@ -61,6 +70,7 @@ class Application:
         self.checkpoints = CheckpointStore(self.db)
         self.memory_service = MemoryService(self.db)
         self.task_service = TaskService(self.db)
+        self.wiki_service = WikiService(self.db, self.settings.workspace_dir)
         self.evidence = EvidenceStore(self.db)
         self.skill_learning = SkillLearningService(self.db)
         self.permission_rules = PermissionRuleStore(self.db, signing_key=self.secrets.permission_signing_key())
@@ -87,6 +97,7 @@ class Application:
 
     async def start(self) -> None:
         await self.db.initialize()
+        await self.memory_service.migrate_unreviewed()
         await self._migrate_user_skills()
         await self.skill_learning.scan_completed_runs(existing_skills=await self._skills(), limit=100)
         mcp = await self._mcp()
@@ -146,8 +157,22 @@ class Application:
             "artifact.list": self.artifact_list,
             "artifact.get": self.artifact_get,
             "memory.list": self.memory_list,
+            "memory.propose": self.memory_propose,
+            "memory.revise": self.memory_revise,
+            "memory.approve": self.memory_approve,
+            "memory.quarantine": self.memory_quarantine,
+            "memory.history": self.memory_history,
+            "wiki.list": self.wiki_list,
+            "wiki.get": self.wiki_get,
+            "wiki.propose": self.wiki_propose,
+            "wiki.approve": self.wiki_approve,
+            "wiki.quarantine": self.wiki_quarantine,
+            "wiki.history": self.wiki_history,
+            "skill_candidate.review": self.skill_candidate_review,
+            "skill_candidate.quarantine": self.skill_candidate_quarantine,
             "task.list": self.task_list,
             "task.get": self.task_get,
+            "task.spec_revise": self.task_spec_revise,
             "task.plan_accept": self.task_plan_accept,
             "task.plan_reject": self.task_plan_reject,
             "computer.status": self.computer_status,
@@ -157,6 +182,8 @@ class Application:
             "extension.import.preview": self.extension_import_preview,
             "extension.import.apply": self.extension_import_apply,
             "skill.install": self.skill_install,
+            "skill.history": self.skill_history,
+            "skill.restore": self.skill_restore,
             "skill.set_enabled": self.skill_set_enabled,
             "skill.delete": self.skill_delete,
             "mcp.add": self.mcp_add,
@@ -422,20 +449,34 @@ class Application:
         return row
 
     async def _add_message(self, cid: str, message: dict[str, Any]) -> None:
-        await self.db.execute(
-            "INSERT INTO messages(conversation_id,role,content,name,tool_call_id,tool_calls_json,reasoning,created_at) VALUES(?,?,?,?,?,?,?,?)",
-            (
-                cid,
-                message["role"],
-                message.get("content"),
-                message.get("name"),
-                message.get("tool_call_id"),
-                dumps(message.get("tool_calls", [])),
-                message.get("reasoning"),
-                now(),
-            ),
-        )
-        await self.db.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now(), cid))
+        stamp = now()
+        auto_title = title_from_first_message(str(message.get("content") or "")) if message["role"] == "user" else "新对话"
+        title_changed = False
+        async with self.db.connect() as db:
+            cursor = await db.execute(
+                "INSERT INTO messages(conversation_id,role,content,name,tool_call_id,tool_calls_json,reasoning,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    cid,
+                    message["role"],
+                    message.get("content"),
+                    message.get("name"),
+                    message.get("tool_call_id"),
+                    dumps(message.get("tool_calls", [])),
+                    message.get("reasoning"),
+                    stamp,
+                ),
+            )
+            await db.execute("UPDATE conversations SET updated_at=? WHERE id=?", (stamp, cid))
+            if auto_title != "新对话":
+                updated = await db.execute(
+                    "UPDATE conversations SET title=? WHERE id=? AND title='新对话' AND NOT EXISTS "
+                    "(SELECT 1 FROM messages WHERE conversation_id=? AND role='user' AND id<?)",
+                    (auto_title, cid, cid, cursor.lastrowid),
+                )
+                title_changed = updated.rowcount > 0
+            await db.commit()
+        if title_changed:
+            await self.broadcast("conversation.updated", {"conversation_id": cid, "title": auto_title})
 
     async def _new_run(self, cid: str | None, text: str, mode: str, **extra: Any) -> dict[str, Any]:
         stamp, rid = now(), uid()
@@ -562,6 +603,7 @@ class Application:
         return {"provider": provider, **item, "api_key": self.secrets.get(provider)}
 
     async def _execute_run(self, run: dict[str, Any], recovery_state: dict[str, Any] | None = None) -> dict[str, Any]:
+        # 新 Run 从会话历史组装上下文；恢复 Run 则从检查点继续，沿用已消耗的预算。
         run.update(status="running", started_at=now(), updated_at=now())
         await self._save_run(run)
         await self._event(run, "agent_started", message=None, tool_call=None, tool_result=None, usage=None)
@@ -601,7 +643,8 @@ class Application:
                     base_system=base_system,
                     core_memory=await self.memory_service.render_core(),
                     memory_index=await self.memory_service.index(),
-                    task_context=await self.task_service.active_context(run["conversation_id"]),
+                    wiki_index=await self.wiki_service.index(),
+                    task_context=await self.task_service.active_context(run["conversation_id"], run_id=run["id"]),
                     skill_catalog=self._skill_catalog(await self._skills()),
                     summarizer=lambda source, previous: self._summarize_context(source, previous, run=run),
                 )
@@ -626,6 +669,7 @@ class Application:
             steps = start_step - 1
             budget_warning_emitted = False
             repeated_calls = RepeatedToolCallGuard()
+            # 每轮固定按“预算检查 → 上下文准备 → 模型调用 → 工具执行 → 检查点”推进。
             for steps in range(start_step, self.settings.max_steps + 1):
                 # Check before each request and again after usage arrives; a model
                 # response can cross the limit even when the request was allowed.
@@ -886,6 +930,7 @@ class Application:
                         stop_reason="run_budget",
                     )
                 repeated_calls.observe(reply.tool_calls)
+                # 工具结果按调用顺序写入会话，保证下一轮模型输入能匹配各自的 tool_call_id。
                 for call in reply.tool_calls:
                     await self._event(
                         run,
@@ -1154,6 +1199,7 @@ class Application:
                     user_text=run["user_message"],
                     assistant_text=result["final_message"]["content"],
                     model=reflect_model,
+                    run_id=run["id"],
                 )
             maintenance_config = await self._role_model_config("maintenance")
 
@@ -1266,6 +1312,7 @@ class Application:
         return await self.run_get(params)
 
     async def run_recover(self, params: dict[str, Any]) -> dict[str, Any]:
+        # 只恢复有检查点的终止 Run；新 Run 继承旧 Run 的消息和用量状态。
         old = (await self.run_get(params))["run"]
         if old["status"] not in {"failed", "cancelled", "interrupted"}:
             raise RpcFault(-32001, "Run is not recoverable")
@@ -1594,6 +1641,15 @@ class Application:
         except KeyError as exc:
             raise RpcFault(-32000, "Task not found") from exc
 
+    async def task_spec_revise(self, params: dict[str, Any]) -> dict[str, Any]:
+        changes = {key: params[key] for key in ("goal", "constraints", "success_criteria") if key in params}
+        try:
+            return {"task": await self.task_service.revise_spec(str(required(params, "task_id")), changes)}
+        except KeyError as exc:
+            raise RpcFault(-32000, "Task not found") from exc
+        except ValueError as exc:
+            raise RpcFault(-32602, str(exc)) from exc
+
     async def _task_decision(self, tid: str, accepted: bool) -> dict[str, Any]:
         try:
             return {"task": await self.task_service.decide(tid, accepted)}
@@ -1611,8 +1667,83 @@ class Application:
     async def memory_list(self, params: dict[str, Any]) -> dict[str, Any]:
         return await self.memory_service.list()
 
-    async def remember(self, *, title: str, summary: str, content: str) -> dict[str, Any]:
-        return await self.memory_service.create(title=title, summary=summary, content=content)
+    async def memory_propose(self, params: dict[str, Any]) -> dict[str, Any]:
+        return {"memory": await self.memory_service.create(
+            title=str(required(params, "title")), summary=str(required(params, "summary")),
+            content=str(required(params, "content")), source_ref=str(required(params, "source_ref")),
+            applicability=str(required(params, "applicability")), source_type="manual",
+        )}
+
+    async def memory_revise(self, params: dict[str, Any]) -> dict[str, Any]:
+        return {"memory": await self.memory_service.update(
+            str(required(params, "memory_id")), title=str(required(params, "title")),
+            summary=str(required(params, "summary")), content=str(required(params, "content")),
+            reason="human_revision", source_ref=str(required(params, "source_ref")), source_type="manual",
+            applicability=str(required(params, "applicability")),
+        )}
+
+    async def memory_approve(self, params: dict[str, Any]) -> dict[str, Any]:
+        return {"memory": await self.memory_service.approve(
+            str(required(params, "memory_id")), reviewer="local_user", checks=dict(required(params, "checks")),
+        )}
+
+    async def memory_quarantine(self, params: dict[str, Any]) -> dict[str, Any]:
+        return {"memory": await self.memory_service.quarantine(
+            str(required(params, "memory_id")), reason=str(required(params, "reason")),
+        )}
+
+    async def memory_history(self, params: dict[str, Any]) -> dict[str, Any]:
+        return {"versions": await self.memory_service.history(str(required(params, "memory_id")))}
+
+    async def wiki_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        return {"entries": await self.wiki_service.list(status=params.get("status"))}
+
+    async def wiki_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        return {"entry": await self.wiki_service.get(str(required(params, "entry_id")))}
+
+    async def wiki_propose(self, params: dict[str, Any]) -> dict[str, Any]:
+        return {"entry": await self.wiki_service.propose(
+            title=str(required(params, "title")), summary=str(required(params, "summary")),
+            content=str(required(params, "content")), source_type=str(required(params, "source_type")),
+            source_ref=str(required(params, "source_ref")), applicability=str(required(params, "applicability")),
+            supersedes_id=str(params["supersedes_id"]) if params.get("supersedes_id") else None,
+        )}
+
+    async def wiki_approve(self, params: dict[str, Any]) -> dict[str, Any]:
+        return {"entry": await self.wiki_service.approve(
+            str(required(params, "entry_id")), reviewer="local_user", checks=dict(required(params, "checks")),
+        )}
+
+    async def wiki_quarantine(self, params: dict[str, Any]) -> dict[str, Any]:
+        return {"entry": await self.wiki_service.quarantine(
+            str(required(params, "entry_id")), reason=str(required(params, "reason")),
+        )}
+
+    async def wiki_history(self, params: dict[str, Any]) -> dict[str, Any]:
+        return {"versions": await self.wiki_service.history(str(required(params, "entry_id")))}
+
+    async def skill_candidate_review(self, params: dict[str, Any]) -> dict[str, Any]:
+        return {"candidate": await self.skill_learning.review(
+            str(required(params, "candidate_id")), reviewer="local_user", checks=dict(required(params, "checks")),
+        )}
+
+    async def skill_candidate_quarantine(self, params: dict[str, Any]) -> dict[str, Any]:
+        candidate = await self.skill_learning.quarantine(
+            str(required(params, "candidate_id")), reason=str(required(params, "reason")),
+        )
+        if candidate.get("promoted_skill"):
+            skills = await self._skills()
+            for skill in skills:
+                if skill.get("candidate_id") == candidate["id"]:
+                    skill["enabled"] = False
+            await self.db.set_json("skills", skills)
+        return {"candidate": candidate}
+
+    async def remember(self, *, title: str, summary: str, content: str, run_id: str | None = None) -> dict[str, Any]:
+        return await self.memory_service.create(
+            title=title, summary=summary, content=content, source_ref=run_id,
+            source_type="run" if run_id else "manual",
+        )
 
     async def automation_list(self, params: dict[str, Any]) -> dict[str, Any]:
         rows = await self.db.fetchall("SELECT data_json FROM automations ORDER BY updated_at DESC")
@@ -1898,12 +2029,32 @@ class Application:
         if name == "memory_list":
             data = await self.memory_service.list()
             status = arguments.get("status")
-            if status in {"active", "archived"}:
-                return {"memories": data[status], "core": data["core"]}
-            return data
+            # The desktop review RPC may see drafts; model-facing tools may only see reviewed active memories.
+            if status is not None and status != "active":
+                raise ValueError("Only active reviewed memories are available to the Agent")
+            return {"memories": data["active"], "active": data["active"], "core": data["core"]}
+        if name == "wiki_search":
+            return {"entries": await self.wiki_service.search(
+                str(required(arguments, "query")), limit=int(arguments.get("limit", 20)),
+            )}
+        if name == "wiki_read":
+            entry = await self.wiki_service.get(str(required(arguments, "entry_id")))
+            if entry["status"] != "active":
+                raise ValueError("wiki entry is not active")
+            return {"entry": entry}
+        if name == "wiki_propose":
+            return {"entry": await self.wiki_service.propose(
+                title=str(required(arguments, "title")), summary=str(required(arguments, "summary")),
+                content=str(required(arguments, "content")), source_type=str(required(arguments, "source_type")),
+                source_ref=str(required(arguments, "source_ref")), applicability=str(required(arguments, "applicability")),
+                supersedes_id=str(arguments["supersedes_id"]) if arguments.get("supersedes_id") else None,
+            )}
         if name == "memory_read":
             try:
-                return {"memory": await self.memory_service.get(str(required(arguments, "memory_id")))}
+                memory = await self.memory_service.get(str(required(arguments, "memory_id")))
+                if memory["status"] != "active":
+                    raise ValueError("memory is not active")
+                return {"memory": memory}
             except KeyError as exc:
                 raise ValueError("memory not found") from exc
         if name == "memory_create":
@@ -1911,11 +2062,15 @@ class Application:
                 title=str(required(arguments, "title")),
                 summary=str(required(arguments, "summary")),
                 content=str(required(arguments, "content")),
+                source_ref=run_id,
+                source_type="run",
             )
             return {"memory": memory}
         if name == "memory_update":
             memory_id = str(required(arguments, "memory_id"))
             values = {key: arguments[key] for key in ("title", "summary", "content") if key in arguments}
+            values["source_ref"] = run_id
+            values["source_type"] = "run"
             try:
                 return {"memory": await self.memory_service.update(memory_id, **values)}
             except KeyError as exc:
@@ -1928,8 +2083,12 @@ class Application:
             except KeyError as exc:
                 raise ValueError("memory not found") from exc
         if name == "core_memory_update":
-            entries = await self.memory_service.update_core(str(required(arguments, "key")), str(required(arguments, "value")))
-            return {"entries": entries}
+            candidate = await self.memory_service.create(
+                title=f"Core memory: {required(arguments, 'key')}", summary="Proposed core fact or preference",
+                content=str(required(arguments, "value")), core_key=str(arguments["key"]), source_ref=run_id,
+                source_type="run",
+            )
+            return {"candidate": candidate}
         if name == "core_memory_remove":
             return {"entries": await self.memory_service.remove_core(str(required(arguments, "key")))}
         if name == "task_create":
@@ -1938,6 +2097,8 @@ class Application:
                 goal=str(required(arguments, "goal")),
                 description=str(arguments.get("description") or ""),
                 steps=list(arguments.get("steps") or []),
+                constraints=list(arguments.get("constraints") or []),
+                success_criteria=list(arguments.get("success_criteria") or []),
                 conversation_id=conversation_id,
                 run_id=run_id,
                 status="pending" if mode == "plan" else "active",
@@ -2285,7 +2446,26 @@ class Application:
                 metadata[key.strip()] = value.strip().strip("\"'")
         return metadata, content[end + 4 :].lstrip()
 
-    async def skill_install(self, params: dict[str, Any]) -> dict[str, Any]:
+    async def skill_install(self, params: dict[str, Any], *, restored_candidate_id: str | None = None) -> dict[str, Any]:
+        candidate_id = params.get("candidate_id")
+        if candidate_id:
+            try:
+                candidate = await self.skill_learning.get(str(candidate_id))
+            except KeyError as exc:
+                raise RpcFault(-32000, "Skill candidate not found") from exc
+            if candidate.get("status") != "approved":
+                raise RpcFault(-32001, "Skill candidate requires human review")
+            if any(scan_knowledge("\n".join(str(candidate.get(key) or "") for key in (
+                "title", "description", "instructions", "applicability",
+            ))).values()):
+                raise RpcFault(-32001, "Unsafe Skill candidate cannot be installed")
+            action = candidate.get("action", {})
+            target_name = action.get("skill_name") if action.get("kind") == "update" else candidate.get("name")
+            if str(params.get("name") or "") != str(target_name or ""):
+                raise RpcFault(-32602, "Candidate target changed after review")
+            for key in ("description", "instructions"):
+                if str(params.get(key) or "") != str(candidate.get(key) or ""):
+                    raise RpcFault(-32602, "Candidate content changed after review")
         name = str(required(params, "name")).strip()
         if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", name) or len(name) > 64:
             raise RpcFault(-32602, "Invalid skill name")
@@ -2293,11 +2473,30 @@ class Application:
         if scope not in {"project", "user"}:
             raise RpcFault(-32602, "Skill scope must be project or user")
         description = str(params.get("description", ""))
+        instructions = str(required(params, "instructions"))
+        if any(scan_knowledge("\n".join((name, description, instructions))).values()):
+            raise RpcFault(-32602, "Skill contains a secret or instruction pattern")
+        current = next((s for s in await self._skills() if s["name"] == name and s["scope"] == scope), None)
+        latest = await self.db.fetchone("SELECT MAX(version) AS version FROM skill_versions WHERE name=? AND scope=?", (name, scope))
+        current_version = int(current.get("version", 1)) if current else 0
+        version = max(current_version, int(latest["version"] or 0)) + 1
+        if current:
+            old_path = Path(str(current["location"]))
+            if old_path.is_file():
+                _, old_instructions = self._parse_skill_document(old_path.read_text(encoding="utf-8"))
+                await self.db.execute(
+                    "INSERT OR IGNORE INTO skill_versions(id,name,scope,version,data_json,created_at) VALUES(?,?,?,?,?,?)",
+                    (uid(), name, scope, current_version, dumps({
+                        "name": name, "scope": scope, "version": current_version,
+                        "description": current.get("description", ""), "instructions": old_instructions,
+                        "candidate_id": current.get("candidate_id"),
+                    }), now()),
+                )
         folder = (self.settings.user_skills_dir if scope == "user" else self.settings.data_dir / "skills" / "project") / name
         folder.mkdir(parents=True, exist_ok=True)
         path = folder / "SKILL.md"
         path.write_text(
-            f"---\nname: {name}\ndescription: {json.dumps(description, ensure_ascii=False)}\n---\n\n{required(params, 'instructions')}\n",
+            f"---\nname: {name}\ndescription: {json.dumps(description, ensure_ascii=False)}\n---\n\n{instructions}\n",
             encoding="utf-8",
         )
         skills = [s for s in await self._skills() if not (s["name"] == name and s["scope"] == scope)]
@@ -2307,15 +2506,50 @@ class Application:
             "scope": scope,
             "location": str(path),
             "enabled": True,
+            "candidate_id": str(candidate_id) if candidate_id else restored_candidate_id,
+            "version": version,
         }
         skills.append(item)
         await self.db.set_json("skills", skills)
-        if params.get("candidate_id"):
+        await self.db.execute(
+            "INSERT INTO skill_versions(id,name,scope,version,data_json,created_at) VALUES(?,?,?,?,?,?)",
+            (uid(), name, scope, version, dumps({
+                "name": name, "scope": scope, "version": version,
+                "description": description, "instructions": instructions,
+                "candidate_id": item["candidate_id"],
+            }), now()),
+        )
+        if candidate_id:
             try:
-                await self.skill_learning.mark_promoted(str(params["candidate_id"]), name)
+                await self.skill_learning.mark_promoted(str(candidate_id), name)
             except KeyError as exc:
                 raise RpcFault(-32000, "Skill candidate not found") from exc
         return {"skill": item}
+
+    async def skill_history(self, params: dict[str, Any]) -> dict[str, Any]:
+        name, scope = str(required(params, "name")), str(required(params, "scope"))
+        rows = await self.db.fetchall(
+            "SELECT data_json,created_at FROM skill_versions WHERE name=? AND scope=? ORDER BY version DESC",
+            (name, scope),
+        )
+        return {"versions": [{**loads(row["data_json"], {}), "created_at": row["created_at"]} for row in rows]}
+
+    async def skill_restore(self, params: dict[str, Any]) -> dict[str, Any]:
+        name, scope, version = str(required(params, "name")), str(required(params, "scope")), int(required(params, "version"))
+        row = await self.db.fetchone(
+            "SELECT data_json FROM skill_versions WHERE name=? AND scope=? AND version=?",
+            (name, scope, version),
+        )
+        if not row:
+            raise RpcFault(-32000, "Skill version not found")
+        saved = loads(row["data_json"], {})
+        if saved.get("candidate_id"):
+            candidate = await self.skill_learning.get(str(saved["candidate_id"]))
+            if candidate.get("status") == "quarantined":
+                raise RpcFault(-32001, "Quarantined Skill version cannot be restored")
+        return await self.skill_install({
+            "name": name, "scope": scope, "description": saved["description"], "instructions": saved["instructions"],
+        }, restored_candidate_id=saved.get("candidate_id"))
 
     async def skill_set_enabled(self, params: dict[str, Any]) -> dict[str, Any]:
         name, scope = str(required(params, "name")), str(required(params, "scope"))
@@ -2323,6 +2557,10 @@ class Application:
         item = next((s for s in skills if s["name"] == name and s["scope"] == scope), None)
         if not item:
             raise RpcFault(-32000, "Skill not found")
+        if params.get("enabled") and item.get("candidate_id"):
+            candidate = await self.skill_learning.get(str(item["candidate_id"]))
+            if candidate.get("status") == "quarantined":
+                raise RpcFault(-32001, "Quarantined Skill cannot be enabled")
         item["enabled"] = bool(params.get("enabled"))
         await self.db.set_json("skills", skills)
         return {"skill": item}

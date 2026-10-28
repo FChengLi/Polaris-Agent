@@ -7,6 +7,8 @@ from .util import dumps, loads, now
 
 
 class CheckpointStore:
+    """保存模型请求边界的状态，让失败或中断的 Run 可以从该处恢复。"""
+
     def __init__(self, db: Database):
         self.db = db
 
@@ -41,6 +43,7 @@ class CheckpointStore:
         }
 
     async def clone(self, source_run_id: str, target_run_id: str) -> dict[str, Any] | None:
+        # 恢复会创建新的 Run，复制检查点而不覆盖旧 Run 的审计记录。
         checkpoint = await self.get(source_run_id)
         if checkpoint is None:
             return None

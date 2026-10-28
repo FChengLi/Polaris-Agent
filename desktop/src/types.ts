@@ -1,3 +1,4 @@
+// 与 Host 的 JSON-RPC 返回值对应；字段名保持后端的 snake_case 格式。
 export interface Conversation { id: string; title: string; created_at: string; updated_at: string; message_count: number }
 export interface Message { role: 'system'|'user'|'assistant'|'tool'; content: string|null; name?: string|null; reasoning?: string|null; tool_call_id?:string|null; tool_calls?:Array<{id:string;name:string;arguments:Record<string,unknown>}> }
 export interface Run { id:string; conversation_id:string|null; status:string; user_message:string; created_at:string; updated_at:string; error:string|null; stop_reason?:string|null; mode:'normal'|'plan'; source?:string|null; recovered_from_run_id?:string|null }

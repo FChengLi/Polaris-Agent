@@ -45,6 +45,7 @@ function UsageCell({label,usage}:{label:string;usage:ModelUsage|undefined}){
   return <div className="run-usage-cell"><span>{label}</span><strong>{usage?formatTokens(usage.total_tokens):'未提供'}</strong><small>{usage?`${usage.model_calls} 次调用 · 输入 ${formatTokens(usage.input_tokens)} · 输出 ${formatTokens(usage.output_tokens)}`:'等待运行记录'}</small></div>
 }
 
+// 主模型与摘要、记忆、Skill 等辅助模型的用量分开呈现。
 function UsagePanel({data}:{data:RunTracePayload}){
   const summary=data.usage_summary
   if(!summary?.main_agent)return <p className="run-muted">当前 Host 尚未提供分类用量。</p>
@@ -144,6 +145,7 @@ function TracePanel({events}:{events:TraceEvent[]}){
   </>
 }
 
+// 从 Run 列表进入事件轨迹，支持按类别查看模型、工具、审批与上下文变化。
 export default function RunExplorer({onOpenConversation,initialRunId}:{onOpenConversation(id:string):void;initialRunId?:string|null}){
   const [selected,setSelected]=useState('')
   useEffect(()=>{if(initialRunId)setSelected(initialRunId)},[initialRunId])

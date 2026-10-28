@@ -18,6 +18,8 @@ class McpToolError(RuntimeError):
 
 @dataclass
 class McpProcess:
+    """维护一个 MCP 子进程、请求序号以及等待响应的调用。"""
+
     config: dict[str, Any]
     supervisor: SandboxSupervisor
     process: asyncio.subprocess.Process | None = None
@@ -34,6 +36,7 @@ class McpProcess:
     pending: dict[int, asyncio.Future[dict[str, Any]]] = field(default_factory=dict)
 
     async def start(self) -> None:
+        # 启动 MCP 服务也走统一沙箱校验，避免插件绕过 Shell 的边界。
         if self.process and self.process.returncode is None:
             await self.close()
         self.error = None
@@ -160,6 +163,8 @@ class McpProcess:
 
 
 class McpManager:
+    """管理多个 MCP 服务的生命周期和工具发现。"""
+
     def __init__(self, workspace: Path | None = None) -> None:
         self.servers: dict[str, McpProcess] = {}
         self.supervisor = SandboxSupervisor((workspace or Path.cwd()).resolve())

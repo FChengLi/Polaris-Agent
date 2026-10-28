@@ -3,16 +3,20 @@ import { useMutation, useQuery } from '@tanstack/react-query'
 import { AlertTriangle, Plus, RefreshCw, RotateCcw, Trash2 } from 'lucide-react'
 import { rpc } from './rpc'
 import { useConfirmAction } from './ConfirmDialog'
+import KnowledgeGovernance from './KnowledgeGovernance'
 
 function Status({ value }: { value: string }) {
   const labels: Record<string, string> = {
     active: '进行中', available: '可用', disabled: '已停用', enabled: '已启用',
     failed: '失败', pending: '待处理', ready: '待审核', restart_required: '需重启',
     running: '运行中', unavailable: '不可用', observing: '观察中',
+    candidate: '待审核', approved: '已审核', promoted: '已安装',
+    quarantined: '已隔离', superseded: '已替代',
   }
   return <span className={`status ${value}`}>{labels[value] || value}</span>
 }
 
+// 设置页读取模型配置与扩展状态；API Key 输入框始终使用空白草稿。
 function PreferencesView() {
   const info = useQuery({ queryKey: ['system'], queryFn: () => rpc.call<any>('system.info') })
   const settings = useQuery({ queryKey: ['model-settings'], queryFn: () => rpc.call<any>('model_settings.get') })
@@ -37,7 +41,7 @@ function PreferencesView() {
   const restart = useMutation({ mutationFn: () => rpc.call('system.restart', {}), onSuccess: () => { settings.refetch(); extensions.refetch() } })
 
   return <section className="page">
-    <header className="page-head"><div><h1>设置</h1><p>配置模型服务、运行环境和扩展能力。</p></div></header>
+    <header className="page-head"><div><h1>设置</h1><p>配置模型服务、运行环境和扩展能力。</p></div><button onClick={()=>{const section=document.getElementById('knowledge-governance');section?.scrollIntoView({block:'start'});section?.focus({preventScroll:true})}}>知识审核</button></header>
     <div className="page-body"><div className="settings-grid">
       <section className="settings-section"><div className="section-heading"><h2>Host</h2>{settings.data?.restart_required&&<Status value="restart_required"/>}</div><dl>
         <dt>版本</dt><dd>{info.data?.version}</dd><dt>数据库</dt><dd className="mono">{info.data?.database}</dd>
@@ -58,6 +62,7 @@ function PreferencesView() {
         <div className="role-settings"><h3>后台模型角色</h3>{(['reflection','maintenance','summary','skill_learning'] as const).map(role=>{const value=roles[role]||{};return <div className="role-row" key={role}><span><strong>{{reflection:'运行后反思',maintenance:'记忆维护',summary:'上下文摘要',skill_learning:'技能学习'}[role]}</strong><small>实际使用：{settings.data?.active_roles?.[role]?.provider||'—'} / {settings.data?.active_roles?.[role]?.model||'—'}</small></span><label><input type="checkbox" checked={value.enabled??true} onChange={e=>setRoles({...roles,[role]:{...value,enabled:e.target.checked}})}/>启用</label><label><input type="checkbox" checked={value.inherit_main??true} onChange={e=>setRoles({...roles,[role]:{...value,inherit_main:e.target.checked}})}/>继承主模型</label>{value.inherit_main===false&&<div className="role-override"><select aria-label={`${role} Provider`} value={value.provider||provider} onChange={e=>setRoles({...roles,[role]:{...value,provider:e.target.value}})}>{settings.data?.providers.map((item:any)=><option key={item.provider} value={item.provider}>{item.label}</option>)}</select><input aria-label={`${role} 模型`} placeholder="模型名" value={value.model||''} onChange={e=>setRoles({...roles,[role]:{...value,model:e.target.value}})}/></div>}</div>})}</div>
       </section>
       <section className="settings-section span-2"><ExtensionManager data={extensions.data} refresh={() => extensions.refetch()}/></section>
+      <section className="settings-section span-2 knowledge-governance" id="knowledge-governance" tabIndex={-1}><KnowledgeGovernance skills={extensions.data?.skill_candidates || []} installedSkills={extensions.data?.skills || []} refreshSkills={() => extensions.refetch()}/></section>
     </div></div>
   </section>
 }
@@ -79,7 +84,6 @@ function ExtensionManager({ data, refresh }: { data: any; refresh(): unknown }) 
   const deleteMcp = useMutation({ mutationFn: (name: string) => rpc.call('mcp.delete', { name }), onSuccess: refresh })
   const previewExtension = useMutation({ mutationFn: () => rpc.call<any>('extension.import.preview', { input: source, skill_scope: 'project', mcp_permission: 'human_approval' }), onSuccess: result=>setImportPlan(result.plan) })
   const importExtension = useMutation({ mutationFn: () => rpc.call('extension.import.apply', { input: source, skill_scope: 'project', mcp_permission: 'human_approval', fingerprint: importPlan.fingerprint, confirmed: true }), onSuccess: () => { setSource(''); setImportPlan(null); refresh() } })
-  const promote = useMutation({ mutationFn: (candidate:any) => rpc.call('skill.install', {name:candidate.name,description:candidate.description,instructions:candidate.instructions,scope:'project',candidate_id:candidate.id}), onSuccess: refresh })
   return <><h2>扩展</h2>
     <div className="import-row"><input value={source} onChange={e => {setSource(e.target.value);setImportPlan(null)}} placeholder="扩展路径、GitHub URL 或 mcpServers JSON"/><button disabled={!source||previewExtension.isPending} onClick={() => previewExtension.mutate()}><Plus size={14}/>预览导入</button></div>
     {importPlan&&<div className="import-plan"><strong>将执行 {importPlan.actions?.length||0} 项变更</strong><ul>{importPlan.actions?.map((action:string)=><li key={action}>{action}</li>)}</ul>{importPlan.warnings?.map((warning:string)=><p key={warning}>{warning}</p>)}<div className="row-actions"><button onClick={()=>setImportPlan(null)}>取消</button><button className="primary" disabled={importExtension.isPending} onClick={()=>importExtension.mutate()}>确认并导入</button></div></div>}
@@ -88,7 +92,6 @@ function ExtensionManager({ data, refresh }: { data: any; refresh(): unknown }) 
     <div className="extension-columns"><div><h3>Skills</h3>
       {data?.skills?.map((s: any) => <div className="extension-row" key={`${s.scope}:${s.name}`}><div><strong>{s.name}</strong><small>{s.description}</small></div><div className="row-actions"><button onClick={() => toggle.mutate({ item: s, enabled: !s.enabled })}>{s.enabled ? '停用' : '启用'}</button><button className="danger" aria-label={`删除 Skill ${s.name}`} onClick={() => {void confirmAction({title:`删除 Skill “${s.name}”？`,message:'这项 Skill 将从当前作用域移除，后续运行无法使用。',confirmLabel:'删除 Skill',destructive:true}).then(yes=>{if(yes)deleteSkill.mutate(s)})}}><Trash2 size={13}/></button></div></div>)}
       <div className="mini-form"><input placeholder="Skill 名称" value={skill.name} onChange={e => setSkill({ ...skill, name: e.target.value })}/><input placeholder="说明" value={skill.description} onChange={e => setSkill({ ...skill, description: e.target.value })}/><textarea placeholder="Skill 指令" value={skill.instructions} onChange={e => setSkill({ ...skill, instructions: e.target.value })}/><button className="primary" disabled={!skill.name || !skill.instructions} onClick={() => install.mutate()}>安装 Skill</button></div>
-      {data?.skill_candidates?.length>0&&<div className="candidate-list"><h3>从成功任务学习</h3>{data.skill_candidates.map((candidate:any)=><div className="candidate-row" key={candidate.id}><div><strong>{candidate.title}</strong><small>{candidate.tool_sequence?.join(' → ')} · 成功 {candidate.success_count} 次</small></div><div className="row-actions"><Status value={candidate.status}/>{candidate.status==='ready'&&<button disabled={promote.isPending} onClick={()=>promote.mutate(candidate)}>审核后安装</button>}</div></div>)}</div>}
     </div><div><h3>MCP Servers</h3>
       {data?.mcp?.servers?.map((s: any) => <div className="extension-row" key={s.name}><div><strong>{s.name}</strong><small>{s.command} {s.args?.join(' ')} · {s.sandbox_backend}</small>{s.error&&<small className="form-error">{s.error}</small>}<small>{s.tool_names?.length||0} 个工具 · 重启 {s.restart_count||0} 次</small></div><div className="row-actions"><Status value={s.state}/><button onClick={()=>toggleMcp.mutate({name:s.name,enabled:!s.enabled})}>{s.enabled?'停用':'启用'}</button><button className="danger" aria-label={`删除 MCP ${s.name}`} onClick={() => {void confirmAction({title:`删除 MCP Server “${s.name}”？`,message:'服务器配置将被删除，之后的运行无法调用它提供的工具。',confirmLabel:'删除 Server',destructive:true}).then(yes=>{if(yes)deleteMcp.mutate(s.name)})}}><Trash2 size={13}/></button></div></div>)}
       <div className="mini-form"><input placeholder="Server 名称" value={mcp.name} onChange={e => setMcp({ ...mcp, name: e.target.value })}/><input placeholder="命令" value={mcp.command} onChange={e => setMcp({ ...mcp, command: e.target.value })}/><input placeholder="参数（空格分隔）" value={mcp.args} onChange={e => setMcp({ ...mcp, args: e.target.value })}/><input placeholder="工作目录（可选）" value={mcp.cwd} onChange={e=>setMcp({...mcp,cwd:e.target.value})}/><textarea placeholder={'环境变量，每行 NAME=value'} value={mcp.env} onChange={e=>setMcp({...mcp,env:e.target.value})}/><div className="mcp-options"><label>权限<select value={mcp.permission} onChange={e => setMcp({ ...mcp, permission: e.target.value })}><option value="human_approval">每次审批</option><option value="allowed">允许</option><option value="forbidden">禁止</option></select></label><label>文件系统<select value={mcp.filesystem} onChange={e=>setMcp({...mcp,filesystem:e.target.value})}><option value="workspace">仅工作区</option><option value="readonly">只读</option><option value="host">主机</option></select></label><label>网络<select value={mcp.network} onChange={e=>setMcp({...mcp,network:e.target.value})}><option value="denied">禁止</option><option value="allowed_domains">仅允许域名</option><option value="allowed">允许</option></select></label></div><textarea placeholder="可读目录（逗号或换行分隔）" value={mcp.readable_roots} onChange={e=>setMcp({...mcp,readable_roots:e.target.value})}/><textarea placeholder="可写目录（逗号或换行分隔）" value={mcp.writable_roots} onChange={e=>setMcp({...mcp,writable_roots:e.target.value})}/><textarea placeholder="允许域名（逗号或换行分隔）" value={mcp.allowed_domains} onChange={e=>setMcp({...mcp,allowed_domains:e.target.value})}/><details className="json-preview"><summary>配置预览</summary><pre>{JSON.stringify(mcpPayload,null,2)}</pre></details><button className="primary" disabled={!mcp.name || !mcp.command} onClick={() => addMcp.mutate()}>添加 MCP</button></div>

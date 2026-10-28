@@ -23,6 +23,8 @@ LOOPBACK = {"127.0.0.1", "::1", "localhost", "testclient"}
 
 
 class Hub:
+    """维护前端 WebSocket 连接，并广播 Run 状态与事件。"""
+
     def __init__(self) -> None:
         self.clients: set[WebSocket] = set()
         self.lock = asyncio.Lock()
@@ -50,6 +52,7 @@ class Hub:
 
 
 def create_app(application: Application | None = None) -> FastAPI:
+    """装配本地 HTTP、WebSocket 入口及 Application 生命周期。"""
     application = application or Application()
     hub = Hub()
     application.broadcast = hub.broadcast

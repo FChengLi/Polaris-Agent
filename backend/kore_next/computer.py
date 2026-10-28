@@ -29,6 +29,8 @@ class ComputerBusyError(RuntimeError):
 
 
 class ComputerClient:
+    """通过本地辅助进程执行桌面操作，并独占一个 Run 的控制权。"""
+
     def __init__(self, settings: Settings, sink: ObservationSink):
         self.settings = settings
         self.sink = sink
@@ -71,6 +73,7 @@ class ComputerClient:
                 self.process.kill()
 
     def _acquire_lease(self, run_id: str) -> ComputerSession:
+        # 文件锁保证不同 Run 或进程不会同时控制同一台电脑。
         if self.session:
             if self.session.run_id != run_id:
                 raise ComputerBusyError("computer is controlled by another run")

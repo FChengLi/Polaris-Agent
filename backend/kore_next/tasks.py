@@ -10,6 +10,8 @@ STEP_STATUSES = {"pending", "in_progress", "completed", "blocked", "skipped"}
 
 
 class TaskService:
+    """持久化任务目标、步骤和规格版本，供跨轮次执行与恢复使用。"""
+
     def __init__(self, db: Database):
         self.db = db
 
@@ -42,10 +44,13 @@ class TaskService:
         goal: str,
         description: str = "",
         steps: list[dict[str, Any]] | None = None,
+        constraints: list[str] | None = None,
+        success_criteria: list[str] | None = None,
         conversation_id: str | None = None,
         run_id: str | None = None,
         status: str = "active",
     ) -> dict[str, Any]:
+        # 任务规格单独记录版本，便于后续判断 Run 绑定的是哪一版目标。
         if status not in TASK_STATUSES:
             raise ValueError("invalid task status")
         stamp = now()
@@ -68,7 +73,8 @@ class TaskService:
             "goal": goal.strip(),
             "status": status,
             "priority": "normal",
-            "constraints": [],
+            "constraints": [str(value).strip() for value in (constraints or []) if str(value).strip()],
+            "success_criteria": [str(value).strip() for value in (success_criteria or []) if str(value).strip()],
             "state": [],
             "key_facts": [],
             "steps": normalized_steps,
@@ -78,13 +84,19 @@ class TaskService:
             "updated_at": stamp,
             "completed_at": stamp if status == "completed" else None,
             "revision": 1,
+            "spec_revision": 1,
+            "spec_history": [],
+            "spec_bindings": {run_id: 1} if run_id else {},
         }
         await self.db.execute("INSERT INTO tasks(id,data_json,updated_at) VALUES(?,?,?)", (task["id"], dumps(task), stamp))
         return task
 
     async def update(self, task_id: str, changes: dict[str, Any], *, run_id: str | None = None) -> dict[str, Any]:
         task = await self.get(task_id)
-        for key in ("title", "description", "goal", "priority", "constraints", "state", "key_facts"):
+        for key in ("goal", "constraints", "success_criteria"):
+            if key in changes and changes[key] != task.get(key, [] if key != "goal" else ""):
+                raise ValueError("Task Spec changes require explicit user revision")
+        for key in ("title", "description", "priority", "state", "key_facts"):
             if key in changes:
                 task[key] = changes[key]
         if "status" in changes:
@@ -97,6 +109,30 @@ class TaskService:
             task["steps"] = self._merge_steps(task.get("steps", []), changes["steps"])
         if run_id and run_id not in task.get("run_ids", []):
             task.setdefault("run_ids", []).append(run_id)
+        if run_id:
+            task.setdefault("spec_bindings", {}).setdefault(run_id, int(task.get("spec_revision", 1)))
+        task["revision"] = int(task.get("revision", 1)) + 1
+        task["updated_at"] = now()
+        await self._save(task)
+        return task
+
+    async def revise_spec(self, task_id: str, changes: dict[str, Any]) -> dict[str, Any]:
+        task = await self.get(task_id)
+        allowed = {"goal", "constraints", "success_criteria"}
+        if not changes or set(changes) - allowed:
+            raise ValueError("Only goal, constraints and success_criteria may be revised")
+        snapshot = {"revision": task.get("spec_revision", 1), "goal": task.get("goal", ""),
+                    "constraints": task.get("constraints", []), "success_criteria": task.get("success_criteria", []),
+                    "replaced_at": now()}
+        for key, value in changes.items():
+            if key != "goal":
+                if not isinstance(value, list):
+                    raise ValueError(f"{key} must be a list")
+                task[key] = [str(item).strip() for item in value if str(item).strip()]
+            else:
+                task[key] = str(value).strip()
+        task.setdefault("spec_history", []).append(snapshot)
+        task["spec_revision"] = int(task.get("spec_revision", 1)) + 1
         task["revision"] = int(task.get("revision", 1)) + 1
         task["updated_at"] = now()
         await self._save(task)
@@ -112,7 +148,7 @@ class TaskService:
         await self._save(task)
         return task
 
-    async def active_context(self, conversation_id: str | None) -> str:
+    async def active_context(self, conversation_id: str | None, *, run_id: str | None = None) -> str:
         tasks = await self.list(limit=100)
         active = [
             task
@@ -123,7 +159,29 @@ class TaskService:
             return ""
         lines = []
         for task in active[:3]:
-            lines.append(f"Task {task['id']}: {task['title']} [{task['status']}]\nGoal: {task.get('goal', '')}")
+            changed = False
+            if run_id and run_id not in task.get("run_ids", []):
+                task.setdefault("run_ids", []).append(run_id)
+                changed = True
+            if run_id and run_id not in task.get("spec_bindings", {}):
+                task.setdefault("spec_bindings", {})[run_id] = int(task.get("spec_revision", 1))
+                changed = True
+            if changed:
+                task["updated_at"] = now()
+                await self._save(task)
+            bound_revision = task.get("spec_bindings", {}).get(run_id, task.get("spec_revision", 1)) if run_id else task.get("spec_revision", 1)
+            spec = task
+            if bound_revision != task.get("spec_revision", 1):
+                spec = next((entry for entry in task.get("spec_history", []) if entry["revision"] == bound_revision), task)
+            lines.append(f"Task {task['id']}: {task['title']} [{task['status']}]\nGoal: {spec.get('goal', '')}")
+            if run_id:
+                lines.append(f"Bound run: {run_id}; Task Spec revision: {bound_revision}")
+            for value in spec.get("constraints", []):
+                lines.append(f"  Constraint: {value}")
+            for value in spec.get("success_criteria", []):
+                lines.append(f"  Success criterion: {value}")
+            for value in task.get("key_facts", []):
+                lines.append(f"  Task fact: {value}")
             for step in task.get("steps", []):
                 lines.append(f"  - {step['id']}: {step['title']} [{step['status']}] {step.get('result') or ''}")
         return "\n".join(lines)

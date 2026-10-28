@@ -1,8 +1,4 @@
-"""Build a run's usage report from persisted model-call events.
-
-Completion and budget events can repeat the same usage payload. Only one event
-per main-model step is counted, so opening an old trace cannot inflate totals.
-"""
+"""根据持久化事件汇总 Run 用量；同一步骤只计一次，避免重复事件抬高统计值。"""
 
 from __future__ import annotations
 
@@ -46,6 +42,7 @@ def _aggregate_usages(raw_usages: list[dict[str, Any]]) -> dict[str, int | None]
 
 
 def summarize_run_usage(events: list[dict[str, Any]], budget: RunBudget) -> dict[str, Any]:
+    # 主模型按步骤去重，摘要、记忆反思等辅助调用单独统计。
     auxiliary_calls: dict[str, list[dict[str, Any]]] = {role: [] for role in AUXILIARY_ROLES}
     main_by_step: dict[int, dict[str, Any]] = {}
     inherited_usage: dict[str, Any] = {}

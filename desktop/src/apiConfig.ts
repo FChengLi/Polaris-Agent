@@ -4,6 +4,7 @@ export function rpcUrl(): string {
   return import.meta.env.VITE_RPC_URL || defaultRpcUrl
 }
 
+// 从 WebSocket RPC 地址推导文件与截图下载接口使用的 HTTP 地址。
 export function httpBaseUrl(value = rpcUrl()): string {
   const url = new URL(value)
   url.protocol = url.protocol === 'wss:' ? 'https:' : 'http:'

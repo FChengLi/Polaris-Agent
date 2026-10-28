@@ -59,6 +59,21 @@ def test_rpc_contract_contains_expected_methods(app):
         "mcp.delete",
         "mcp.set_enabled",
         "memory.list",
+        "memory.propose",
+        "memory.revise",
+        "memory.approve",
+        "memory.quarantine",
+        "memory.history",
+        "wiki.list",
+        "wiki.get",
+        "wiki.propose",
+        "wiki.approve",
+        "wiki.quarantine",
+        "wiki.history",
+        "skill_candidate.review",
+        "skill_candidate.quarantine",
+        "skill.history",
+        "skill.restore",
         "model_settings.get",
         "model_settings.test",
         "model_settings.update",
@@ -76,6 +91,7 @@ def test_rpc_contract_contains_expected_methods(app):
         "task.list",
         "task.plan_accept",
         "task.plan_reject",
+        "task.spec_revise",
         "trace.get",
     }
     assert set(app.methods()) == expected
@@ -88,6 +104,31 @@ async def test_conversation_and_offline_run(app):
     assert "模型尚未配置" in response["content"]
     detail = await app.conversation_get({"conversation_id": conversation["id"]})
     assert [message["role"] for message in detail["messages"]] == ["user", "assistant"]
+
+
+async def test_first_message_sets_conversation_title_once(app):
+    events = []
+
+    async def capture(method, params):
+        events.append((method, params))
+
+    app.broadcast = capture
+    conversation = (await app.conversation_create({}))["conversation"]
+    cid = conversation["id"]
+    assert conversation["title"] == "新对话"
+
+    await app.conversation_send({"conversation_id": cid, "content": "  \n  帮我整理这个项目的运行方法和配置步骤  \n其他说明", "mode": "normal"})
+    title = (await app.conversation_get({"conversation_id": cid}))["conversation"]["title"]
+    assert title == "帮我整理这个项目的运行方法和配置步骤"
+    assert ("conversation.updated", {"conversation_id": cid, "title": title}) in events
+
+    await app.conversation_send({"conversation_id": cid, "content": "再补充测试命令", "mode": "normal"})
+    assert (await app.conversation_get({"conversation_id": cid}))["conversation"]["title"] == title
+    assert len([method for method, _ in events if method == "conversation.updated"]) == 1
+
+    custom = (await app.conversation_create({"title": "我起的标题"}))["conversation"]
+    await app.conversation_send({"conversation_id": custom["id"], "content": "不要覆盖标题", "mode": "normal"})
+    assert (await app.conversation_get({"conversation_id": custom["id"]}))["conversation"]["title"] == "我起的标题"
 
 
 async def test_session_search_finds_other_conversations_and_tracks_deletion(app):
@@ -349,3 +390,130 @@ async def test_skill_and_mcp_management(app):
     overview = await app.extension_list({})
     assert overview["skills"][0]["name"] == "writer"
     assert overview["mcp"]["servers"][0]["name"] == "files"
+
+
+async def test_reviewed_wiki_and_memory_are_the_only_new_context_entries(app):
+    checks = {key: True for key in ("relevance", "source", "applicability", "sensitive_information", "prompt_injection")}
+    wiki = (await app.wiki_propose({
+        "title": "API convention", "summary": "Use JSON-RPC", "content": "Host operations use JSON-RPC.",
+        "source_type": "manual", "source_ref": "maintainer note", "applicability": "Host API",
+    }))["entry"]
+    memory = (await app.memory_propose({
+        "title": "Language", "summary": "Chinese replies", "content": "Reply in Chinese.",
+        "source_ref": "user preference", "applicability": "user",
+    }))["memory"]
+    assert await app.wiki_service.index() == ""
+    assert await app.memory_service.index() == ""
+    conversation = (await app.conversation_create({}))["conversation"]
+    run = await app._new_run(conversation["id"], "Review knowledge", "normal")
+    with pytest.raises(ValueError, match="not active"):
+        await app.tool_call("wiki_read", {"entry_id": wiki["id"]}, run_id=run["id"], mode="normal")
+    await app.wiki_approve({"entry_id": wiki["id"], "checks": checks})
+    await app.memory_approve({"memory_id": memory["id"], "checks": checks})
+    assert "API convention" in await app.wiki_service.index()
+    assert "Language" in await app.memory_service.index()
+    await app.wiki_quarantine({"entry_id": wiki["id"], "reason": "Outdated"})
+    await app.memory_quarantine({"memory_id": memory["id"], "reason": "Wrong preference"})
+    assert await app.wiki_service.index() == ""
+    assert await app.memory_service.index() == ""
+
+
+async def test_skill_versions_can_restore(app):
+    first = (await app.skill_install({
+        "name": "writer", "scope": "project", "description": "Write", "instructions": "Draft then verify the output.",
+    }))["skill"]
+    second = (await app.skill_install({
+        "name": "writer", "scope": "project", "description": "Write", "instructions": "Draft, revise, then verify.",
+    }))["skill"]
+    assert (first["version"], second["version"]) == (1, 2)
+    assert [version["version"] for version in (await app.skill_history({"name": "writer", "scope": "project"}))["versions"]] == [2, 1]
+    restored = (await app.skill_restore({"name": "writer", "scope": "project", "version": 1}))["skill"]
+    assert restored["version"] == 3
+    conversation = (await app.conversation_create({}))["conversation"]
+    run = await app._new_run(conversation["id"], "Read skill", "normal")
+    assert "Draft then verify" in (await app.tool_call("skill_read", {"name": "writer"}, run_id=run["id"], mode="normal"))["content"]
+
+
+async def test_quarantining_promoted_skill_disables_it(app):
+    item = (await app.skill_install({
+        "name": "writer", "scope": "project", "description": "Write", "instructions": "Draft and verify.",
+    }))["skill"]
+    candidate = {"id": "candidate-1", "status": "promoted", "promoted_skill": "writer", "name": "writer"}
+    await app.db.execute(
+        "INSERT INTO skill_candidates(id,status,data_json,created_at,updated_at) VALUES(?,?,?,?,?)",
+        (candidate["id"], "promoted", dumps(candidate), now(), now()),
+    )
+    skills = await app._skills()
+    skills[0]["candidate_id"] = candidate["id"]
+    await app.db.set_json("skills", skills)
+    await app.skill_candidate_quarantine({"candidate_id": candidate["id"], "reason": "Faulty steps"})
+    updated = next(skill for skill in await app._skills() if skill["name"] == item["name"])
+    assert updated["enabled"] is False
+    with pytest.raises(RpcFault, match="Quarantined Skill cannot be enabled"):
+        await app.skill_set_enabled({"name": "writer", "scope": "project", "enabled": True})
+
+
+async def test_agent_memory_tools_cannot_expose_unreviewed_or_quarantined_content(app):
+    checks = {key: True for key in ("relevance", "source", "applicability", "sensitive_information", "prompt_injection")}
+    draft = (await app.memory_propose({
+        "title": "Unreviewed", "summary": "Draft preference", "content": "Unverified draft content",
+        "source_ref": "User note", "applicability": "user",
+    }))["memory"]
+    conversation = (await app.conversation_create({}))["conversation"]
+    run = await app._new_run(conversation["id"], "Read memories", "normal")
+    async def listed(arguments):
+        return await app.tool_call("memory_list", arguments, run_id=run["id"], mode="normal")
+    assert (await listed({}))["memories"] == []
+    for status in ("candidates", "quarantined", "archived"):
+        with pytest.raises(ValueError, match="Only active reviewed"):
+            await listed({"status": status})
+    with pytest.raises(ValueError, match="not active"):
+        await app.tool_call("memory_read", {"memory_id": draft["id"]}, run_id=run["id"], mode="normal")
+    await app.memory_approve({"memory_id": draft["id"], "checks": checks})
+    assert [item["id"] for item in (await listed({}))["memories"]] == [draft["id"]]
+    await app.memory_quarantine({"memory_id": draft["id"], "reason": "Incorrect"})
+    assert (await listed({}))["memories"] == []
+
+
+async def test_reinstalling_deleted_skill_keeps_version_history(app):
+    params = {"name": "writer", "scope": "project", "description": "Write", "instructions": "Draft and verify."}
+    await app.skill_install(params)
+    await app.skill_delete({"name": "writer", "scope": "project"})
+    reinstalled = (await app.skill_install({**params, "instructions": "Revise and verify."}))["skill"]
+    assert reinstalled["version"] == 2
+    assert [item["version"] for item in (await app.skill_history(params))["versions"]] == [2, 1]
+    restored = (await app.skill_restore({**params, "version": 1}))["skill"]
+    assert restored["version"] == 3
+
+
+async def test_restored_learned_skill_keeps_quarantine_provenance(app):
+    candidate = {
+        "id": "learned-writer", "status": "approved", "name": "writer", "title": "Writer", "description": "Write",
+        "instructions": "Draft and verify.", "action": {"kind": "create"},
+    }
+    await app.db.execute(
+        "INSERT INTO skill_candidates(id,status,data_json,created_at,updated_at) VALUES(?,?,?,?,?)",
+        (candidate["id"], candidate["status"], dumps(candidate), now(), now()),
+    )
+    params = {"name": "writer", "scope": "project", "description": "Write", "instructions": candidate["instructions"]}
+    await app.skill_install({**params, "candidate_id": candidate["id"]})
+    await app.skill_install({**params, "instructions": "Draft, revise, verify."})
+    restored = (await app.skill_restore({**params, "version": 1}))["skill"]
+    assert restored["candidate_id"] == candidate["id"]
+    await app.skill_candidate_quarantine({"candidate_id": candidate["id"], "reason": "Faulty learned process"})
+    assert (await app._skills())[0]["enabled"] is False
+    with pytest.raises(RpcFault, match="Quarantined Skill version"):
+        await app.skill_restore({**params, "version": 1})
+
+
+async def test_human_memory_revision_retains_new_applicability(app):
+    draft = (await app.memory_propose({
+        "title": "Convention", "summary": "Naming", "content": "Use descriptive names.",
+        "source_ref": "Maintainer note", "applicability": "backend",
+    }))["memory"]
+    revised = (await app.memory_revise({
+        "memory_id": draft["id"], "title": draft["title"], "summary": draft["summary"], "content": draft["content"],
+        "source_ref": "Revised maintainer note", "applicability": "frontend only",
+    }))["memory"]
+    assert revised["applicability"] == "frontend only"
+    assert revised["status"] == "candidate"

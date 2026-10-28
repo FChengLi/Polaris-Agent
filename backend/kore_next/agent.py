@@ -42,6 +42,7 @@ def _search_result_url(raw: str) -> str | None:
     return candidate
 
 
+# 内置工具先声明给模型；真正执行时仍需经过模式、审批和沙箱检查。
 TOOLS = [
     {
         "type": "function",
@@ -172,7 +173,7 @@ TOOLS.extend(
         _definition("memory_read", "Read one long-term memory record.", {"memory_id": {"type": "string"}}, ["memory_id"]),
         _definition(
             "memory_create",
-            "Create a durable long-term memory.",
+            "Propose a durable long-term memory for human review.",
             {"title": {"type": "string"}, "summary": {"type": "string"}, "content": {"type": "string"}},
             ["title", "summary", "content"],
         ),
@@ -195,6 +196,8 @@ TOOLS.extend(
                 "goal": {"type": "string"},
                 "description": {"type": "string"},
                 "steps": {"type": "array", "items": {"type": "object"}},
+                "constraints": {"type": "array", "items": {"type": "string"}},
+                "success_criteria": {"type": "array", "items": {"type": "string"}},
             },
             ["title", "goal"],
         ),
@@ -205,6 +208,8 @@ TOOLS.extend(
                 "task_id": {"type": "string"},
                 "status": {"type": "string"},
                 "description": {"type": "string"},
+                "constraints": {"type": "array", "items": {"type": "string"}},
+                "success_criteria": {"type": "array", "items": {"type": "string"}},
                 "state": {"type": "array"},
                 "key_facts": {"type": "array"},
                 "steps": {"type": "array", "items": {"type": "object"}},
@@ -213,6 +218,15 @@ TOOLS.extend(
         ),
         _definition("task_get", "Read a tracked task.", {"task_id": {"type": "string"}}, ["task_id"]),
         _definition("task_list", "List tracked tasks.", {"status": {"type": "string"}, "limit": {"type": "integer"}}),
+        _definition("wiki_search", "Search reviewed project Wiki entries.", {"query": {"type": "string"}, "limit": {"type": "integer"}}, ["query"]),
+        _definition("wiki_read", "Read one reviewed project Wiki entry.", {"entry_id": {"type": "string"}}, ["entry_id"]),
+        _definition(
+            "wiki_propose", "Propose a project fact or reusable experience for human review.",
+            {"title": {"type": "string"}, "summary": {"type": "string"}, "content": {"type": "string"},
+             "source_type": {"type": "string"}, "source_ref": {"type": "string"},
+             "applicability": {"type": "string"}, "supersedes_id": {"type": "string"}},
+            ["title", "summary", "content", "source_type", "source_ref", "applicability"],
+        ),
         _definition(
             "skill_read", "Read the instructions for an available skill.", {"name": {"type": "string"}, "scope": {"type": "string"}}, ["name"]
         ),
@@ -261,6 +275,8 @@ PLAN_ALLOWED_TOOLS = {
     "session_search",
     "memory_list",
     "memory_read",
+    "wiki_search",
+    "wiki_read",
     "task_create",
     "task_update",
     "task_get",
@@ -343,6 +359,8 @@ def _openai_cache_usage(usage: dict[str, Any], details_name: str) -> dict[str, i
 
 
 class ModelClient:
+    """把不同模型提供商的响应统一为 ModelReply。"""
+
     def __init__(self, settings: Settings, model_config: dict[str, Any] | None = None):
         self.settings = settings
         self.config = model_config or {}
@@ -369,6 +387,7 @@ class ModelClient:
             if on_reasoning_delta:
                 await on_reasoning_delta(delta)
 
+        # 只有尚未向界面发出流式内容时才重试，避免用户看到重复片段。
         for attempt in range(3):
             try:
                 return await self._complete_once(
@@ -939,6 +958,8 @@ class ModelClient:
 
 
 class ToolExecutor:
+    """工具执行边界：先确认可见性与权限，再交给本地或外部实现。"""
+
     def __init__(
         self,
         settings: Settings,
@@ -969,6 +990,7 @@ class ToolExecutor:
         return base, extra
 
     def activate_tools(self, query: str, mode: str) -> dict[str, Any]:
+        # 可选工具按需激活，避免每次模型请求都携带完整工具声明。
         options = builtin_tool_definitions(mode)
         if mode != "plan":
             options = [*options, *self.mcp.tool_definitions(), *self.computer.tool_definitions()]
@@ -996,6 +1018,7 @@ class ToolExecutor:
         *,
         mode: str = "normal",
     ) -> str:
+        # Plan 模式限制副作用；普通模式也必须先通过工具激活与审批门禁。
         if mode == "plan" and name not in PLAN_ALLOWED_TOOLS and not name.startswith("computer_observe"):
             raise PermissionError(f"Tool {name} is not available in plan mode")
         if name == "tool_catalog":
@@ -1105,8 +1128,9 @@ class ToolExecutor:
                 title=str(arguments.get("title", "Memory")),
                 summary=str(arguments.get("summary", "")),
                 content=str(arguments.get("content", "")),
+                run_id=run_id,
             )
-            return f"Stored memory {memory['id']}"
+            return f"Proposed memory {memory['id']} for human review"
         if self.services is not None and name in {
             "history_search",
             "history_read",
@@ -1122,6 +1146,9 @@ class ToolExecutor:
             "task_update",
             "task_get",
             "task_list",
+            "wiki_search",
+            "wiki_read",
+            "wiki_propose",
             "skill_read",
             "skill_resource_read",
             "evidence_search",

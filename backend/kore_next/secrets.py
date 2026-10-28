@@ -15,17 +15,13 @@ SERVICE = "com.koreagent-next.desktop.model-api-key"
 
 
 class SecretStore:
-    """Store model credentials in Keychain or Windows DPAPI.
-
-    Plain-text JSON written by early development builds is read for migration but is
-    never written again.
-    """
+    """用 macOS Keychain 或 Windows DPAPI 保存凭据；旧版明文仅用于迁移读取。"""
 
     def __init__(self, settings_dir: Path):
         self.path = settings_dir / "secrets.json"
 
     def permission_signing_key(self) -> bytes | None:
-        """Return a stable OS-protected key, or disable persistent rules on unsupported hosts."""
+        """返回受系统保护的稳定签名密钥；不支持的平台禁用持久授权规则。"""
         if sys.platform not in {"darwin", "win32"}:
             return None
         account = "__permission_rules_signing_key_v2"

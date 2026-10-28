@@ -13,6 +13,7 @@ import aiosqlite
 SCHEMA = """
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
+-- 会话消息保存原始记录；Run、事件和检查点分别承载执行状态与可追溯信息。
 CREATE TABLE IF NOT EXISTS conversations(
  id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
@@ -83,14 +84,26 @@ CREATE TABLE IF NOT EXISTS skill_candidates(
  id TEXT PRIMARY KEY, status TEXT NOT NULL, data_json TEXT NOT NULL,
  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS skill_versions(
+ id TEXT PRIMARY KEY, name TEXT NOT NULL, scope TEXT NOT NULL, version INTEGER NOT NULL,
+ data_json TEXT NOT NULL, created_at TEXT NOT NULL,
+ UNIQUE(name,scope,version)
+);
+CREATE TABLE IF NOT EXISTS wiki_entries(
+ id TEXT PRIMARY KEY, project_id TEXT NOT NULL, status TEXT NOT NULL,
+ data_json TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_wiki_project_status ON wiki_entries(project_id,status,updated_at);
 CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY, value_json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
 """
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 4
 
 
 class Database:
+    """集中封装 SQLite 初始化和短事务访问，避免业务层持有长连接。"""
+
     def __init__(self, path: Path):
         self.path = path
 

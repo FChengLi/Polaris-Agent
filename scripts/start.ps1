@@ -54,7 +54,7 @@ if (-not (Test-Path -LiteralPath $Python) -or -not (Test-Path -LiteralPath $Pip)
   }
 }
 
-& $Python -c 'import fastapi, uvicorn' 2>$null
+& $Python -c "import importlib.util, sys; sys.exit(not all(importlib.util.find_spec(name) for name in ('fastapi', 'uvicorn')))"
 $BackendDependenciesReady = $LASTEXITCODE -eq 0
 if (-not $BackendDependenciesReady) {
   Write-Host '[Polaris Agent] Installing backend dependencies...'

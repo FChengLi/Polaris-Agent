@@ -17,6 +17,7 @@ const scopeLabels: Record<PermissionScope, string> = {
   global: '始终允许',
 }
 
+// 将工具名和目标整理成人能直接核对的审批标题。
 export function approvalTitle(approval: Pick<Approval, 'tool_name'|'arguments'>): string {
   const base = toolLabels[approval.tool_name] || approval.tool_name.replaceAll('_', ' ')
   const target = approval.arguments.path || approval.arguments.app || approval.arguments.host || approval.arguments.url_origin

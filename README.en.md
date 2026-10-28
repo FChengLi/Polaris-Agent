@@ -24,12 +24,23 @@ This repository is a record of my learning and experiments. I will update it fro
 - **Approvals**: confirmation for sensitive actions, plus an independent always-on-top window for computer operations.
 - **Automations**: one-time, interval, and Cron tasks.
 - **Artifacts**: display, preview, and download files and links.
-- **Memory and ongoing tasks**: core memory, cross-conversation search, post-run reflection, and tasks with steps.
-- **Extensions**: Skill installation and management, MCP Server configuration and import.
+- **Memory and ongoing tasks**: core memory, cross-conversation search, post-run reflection, and tasks with steps. New memories require review; goals, constraints, and acceptance criteria are versioned.
+- **Project Wiki and knowledge review**: sourced project facts and experience, with review, revision history, and quarantine. Agents can retrieve active entries on demand.
+- **Extensions**: Skill installation and management, MCP Server configuration and import. Learned Skills require review before installation and support version restoration.
 - **Model configuration**: OpenAI, DeepSeek, Qwen, and Anthropic.
 - **Experimental computer use**: a native macOS helper for screenshots, accessibility observations, clicks, typing, and window focus.
 
 These capabilities are still evolving. Availability depends on the model, system permissions, and platform.
+
+## Feature merge — October 28, 2026
+
+The knowledge review, project Wiki, task specifications, and conversation fixes from KoreAgent1027 are now integrated. The Polaris logo, fonts, light/dark palette, and Windows title bar are preserved. See the [changelog](CHANGELOG.md).
+
+In Settings, select **知识审核** (Knowledge Review) to manage Wiki entries, long-term memory, Skill review and versions, and task specifications. Review checks cover relevance, sources, applicability, sensitive information, and prompt injection. Pattern checks only flag some obvious risks; factual verification still requires a person.
+
+**Existing data**: database upgrades create a backup first. Legacy unreviewed long-term and core memories are retained as candidates and require approval before reuse in later tasks. Conversations and run records are retained. New task runs bind to the current specification revision; existing runs keep their original version after a user revises the goal.
+
+Wiki search currently uses keyword matching and scopes entries by workspace path. This update does not introduce a vector database or LangChain / LangGraph dependencies.
 
 ## Structure
 
