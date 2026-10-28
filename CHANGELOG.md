@@ -1,6 +1,6 @@
 # 更新记录 / Changelog
 
-## 2026-10-28 — 合入 KoreAgent1027 / Integrate KoreAgent1027
+## 2026-10-28 — 功能更新 / Feature update
 
 ### 新增与改进
 
@@ -15,8 +15,6 @@
 - 修复 Skill 删除后重装的版本编号冲突，恢复旧版本时保留候选关联，使隔离继续有效。
 - 新增审核、迁移及版本恢复回归测试，补充中文源码说明。
 
-保留既有 Polaris 名称、北极星 Logo、本地字体、配色、桌面启动器、窗口标题栏和双语说明。核心仍为自定义 Python Agent 运行时。
-
 ### Added and improved
 
 - Project Wiki with source references, keyword search, human review, revisions, and quarantine.
@@ -29,5 +27,3 @@
 - Restricted model-facing memory listing to reviewed active entries.
 - Fixed version conflicts when reinstalling deleted Skills and retained candidate provenance when restoring versions.
 - Added regression coverage for review boundaries, migration, and version recovery, plus Chinese source comments.
-
-Existing Polaris branding, North Star assets, bundled fonts, palette, desktop launcher, Windows title bar, and bilingual documentation are retained. The core remains a custom Python Agent runtime.

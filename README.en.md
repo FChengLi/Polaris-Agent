@@ -32,9 +32,9 @@ This repository is a record of my learning and experiments. I will update it fro
 
 These capabilities are still evolving. Availability depends on the model, system permissions, and platform.
 
-## Feature merge — October 28, 2026
+## Feature update — October 28, 2026
 
-The knowledge review, project Wiki, task specifications, and conversation fixes from KoreAgent1027 are now integrated. The Polaris logo, fonts, light/dark palette, and Windows title bar are preserved. See the [changelog](CHANGELOG.md).
+Added project Wiki, knowledge review, Skill version restoration, and task specification management. Improved automatic conversation titles and chat status updates. See the [changelog](CHANGELOG.md).
 
 In Settings, select **知识审核** (Knowledge Review) to manage Wiki entries, long-term memory, Skill review and versions, and task specifications. Review checks cover relevance, sources, applicability, sensitive information, and prompt injection. Pattern checks only flag some obvious risks; factual verification still requires a person.
 
